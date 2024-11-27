@@ -4,7 +4,7 @@
 
 [English](README.md) | 简体中文 | [日本語](README_JP.md)
 
-![memos-search](docs/images/memos-search-cn.gif)
+![pensieve-search](docs/images/pensieve-search-en.gif)
 
 [![哔哩哔哩](https://img.shields.io/badge/Bilibili-哔哩哔哩-%23fb7299)](https://www.bilibili.com/video/BV16XUkY7EJm)
 
@@ -75,7 +75,7 @@ memos start
 
 打开浏览器，访问 `http://localhost:8839`
 
-![init page](docs/images/init-page-cn.png)
+![init page](docs/images/init-page-en.png)
 
 ### Mac 下的权限问题
 
