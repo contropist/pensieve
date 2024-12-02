@@ -4,9 +4,9 @@
 
 English | [简体中文](README_ZH.md) | [日本語](README_JP.md)
 
-![memos-search](docs/images/memos-search-en.gif)
+![pensieve-search](docs/images/pensieve-search-en.gif)
 
-[![哔哩哔哩](https://img.shields.io/badge/Bilibili-哔哩哔哩-%23fb7299)](https://www.bilibili.com/video/BV16XUkY7EJm)
+[![哔哩哔哩](https://img.shields.io/badge/Bilibili-哔哩哔哩-%23fb7299)](https://www.bilibili.com/video/BV16XUkY7EJm) [![YouTube](https://img.shields.io/badge/YouTube-YouTube-%23ff0000)](https://www.youtube.com/watch?v=tAnYkeKTFUc)
 
 > I changed the name to Pensieve because Memos was already taken.
 
@@ -37,7 +37,19 @@ This project draws heavily from two other projects: one called [Rewind](https://
 >
 > ```python
 > import sqlite3
-> print(sqlite3.sqlite_version)
+> 
+> # Check sqlite version
+> print(f"SQLite version: {sqlite3.sqlite_version}")
+> 
+> # Test if enable_load_extension is supported
+> try:
+>     conn = sqlite3.connect(':memory:')
+>     conn.enable_load_extension(True)
+>     print("enable_load_extension is supported")
+> except AttributeError:
+>     print("enable_load_extension is not supported")
+> finally:
+>     conn.close()
 > ```
 >
 > If you find that this does not work properly, you can install [miniconda](https://docs.conda.io/en/latest/miniconda.html) to manage your Python environment. Alternatively, check the current issue list to see if others have encountered the same problem.

@@ -24,6 +24,8 @@ import psutil
 import signal
 from tabulate import tabulate
 
+from memos import __version__
+
 
 app = typer.Typer(context_settings={"help_option_names": ["-h", "--help"]})
 
@@ -160,7 +162,7 @@ def get_or_create_default_library():
 
 @app.command("scan")
 def scan_default_library(
-    force: bool = typer.Option(True, "--force", help="Force update all indexes"),
+    force: bool = typer.Option(False, "--force", help="Force update all indexes"),
     path: str = typer.Argument(None, help="Path to scan within the library"),
     plugins: List[int] = typer.Option(None, "--plugin", "-p"),
     folders: List[int] = typer.Option(None, "--folder", "-f"),
@@ -621,6 +623,22 @@ def start():
 def config():
     """Show current configuration settings"""
     display_config()
+
+
+@app.command("version")
+def version():
+    """Output the package version, Python version, and platform information in a single line."""
+    # Get Python version
+    python_version = sys.version.split()[0]  # Only get the version number
+
+    # Get platform information
+    system = platform.system()
+    machine = platform.machine()
+
+    # Output all information in a single line
+    typer.echo(
+        f"Package: {__version__}, Python: {python_version}, System: {system.lower()}/{machine.lower()}"
+    )
 
 
 if __name__ == "__main__":
