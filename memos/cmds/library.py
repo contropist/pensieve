@@ -10,7 +10,7 @@ import logging.config
 from pathlib import Path
 from datetime import datetime
 from enum import Enum
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any, Optional, Set
 from functools import lru_cache
 from collections import defaultdict, deque
 
@@ -170,204 +170,47 @@ def is_temp_file(filename):
 
 
 async def loop_files(library_id, folder, folder_path, force, plugins, batch_size):
+    """
+    Process files in the folder
+
+    Args:
+        library_id: Library ID
+        folder: Folder information
+        folder_path: Folder path
+        force: Whether to force update
+        plugins: List of plugins
+        batch_size: Batch size
+
+    Returns:
+        Tuple[int, int, int]: (Number of files added, Number of files updated, Number of files deleted)
+    """
     updated_file_count = 0
     added_file_count = 0
-    scanned_files = set()
+    deleted_file_count = 0
     semaphore = asyncio.Semaphore(batch_size)
 
     async with httpx.AsyncClient(timeout=60) as client:
-        tasks = []
-        for root, _, files in os.walk(folder_path):
-            with tqdm(total=len(files), desc=f"Scanning {root}", leave=True) as pbar:
-                candidate_files = []
-                for file in files:
-                    file_path = Path(root) / file
-                    absolute_file_path = file_path.resolve()  # Get absolute path
-                    relative_path = absolute_file_path.relative_to(folder_path)
+        # 1. Collect candidate files
+        candidate_files = await collect_candidate_files(folder_path)
+        scanned_files = set(candidate_files)
 
-                    # Check if the file extension is in the include_files list and not a temp file
-                    if file_path.suffix.lower() in include_files and not is_temp_file(
-                        file
-                    ):
-                        scanned_files.add(str(absolute_file_path))
-                        candidate_files.append(str(absolute_file_path))
+        # 2. Process file batches
+        added_file_count, updated_file_count = await process_file_batches(
+            client,
+            library_id,
+            folder,
+            candidate_files,
+            force,
+            plugins,
+            semaphore,
+        )
 
-                batching = 200
-                for i in range(0, len(candidate_files), batching):
-                    batch = candidate_files[i : i + batching]
+        # 3. Check for deleted files
+        deleted_file_count = await check_deleted_files(
+            client, library_id, folder, folder_path, scanned_files
+        )
 
-                    # Get batch of entities
-                    get_response = await client.post(
-                        f"{BASE_URL}/libraries/{library_id}/entities/by-filepaths",
-                        json=batch,
-                    )
-
-                    if get_response.status_code == 200:
-                        existing_entities = get_response.json()
-                    else:
-                        print(
-                            f"Failed to get entities: {get_response.status_code} - {get_response.text}"
-                        )
-                        continue
-
-                    existing_entities_dict = {
-                        entity["filepath"]: entity for entity in existing_entities
-                    }
-
-                    for file_path in batch:
-                        absolute_file_path = Path(file_path).resolve()
-                        file_stat = absolute_file_path.stat()
-                        file_type, file_type_group = get_file_type(absolute_file_path)
-
-                        new_entity = {
-                            "filename": absolute_file_path.name,
-                            "filepath": str(absolute_file_path),
-                            "size": file_stat.st_size,
-                            "file_created_at": format_timestamp(file_stat.st_ctime),
-                            "file_last_modified_at": format_timestamp(
-                                file_stat.st_mtime
-                            ),
-                            "file_type": file_type,
-                            "file_type_group": file_type_group,
-                            "folder_id": folder["id"],
-                        }
-
-                        is_thumbnail = False
-
-                        if file_type_group == "image":
-                            metadata = get_image_metadata(absolute_file_path)
-                            if metadata:
-                                if (
-                                    "active_window" in metadata
-                                    and "active_app" not in metadata
-                                ):
-                                    metadata["active_app"] = metadata[
-                                        "active_window"
-                                    ].split(" - ")[0]
-                                new_entity["metadata_entries"] = [
-                                    {
-                                        "key": key,
-                                        "value": str(value),
-                                        "source": MetadataSource.SYSTEM_GENERATED.value,
-                                        "data_type": (
-                                            "number"
-                                            if isinstance(value, (int, float))
-                                            else "text"
-                                        ),
-                                    }
-                                    for key, value in metadata.items()
-                                    if key != IS_THUMBNAIL
-                                ]
-                                if "active_app" in metadata:
-                                    new_entity.setdefault("tags", []).append(
-                                        metadata["active_app"]
-                                    )
-                                is_thumbnail = metadata.get(IS_THUMBNAIL, False)
-
-                        existing_entity = existing_entities_dict.get(
-                            str(absolute_file_path)
-                        )
-                        if existing_entity:
-                            existing_created_at = format_timestamp(
-                                existing_entity["file_created_at"]
-                            )
-                            new_created_at = format_timestamp(
-                                new_entity["file_created_at"]
-                            )
-                            existing_modified_at = format_timestamp(
-                                existing_entity["file_last_modified_at"]
-                            )
-                            new_modified_at = format_timestamp(
-                                new_entity["file_last_modified_at"]
-                            )
-
-                            # Ignore file changes for thumbnails
-                            if is_thumbnail:
-                                new_entity["file_created_at"] = existing_entity[
-                                    "file_created_at"
-                                ]
-                                new_entity["file_last_modified_at"] = existing_entity[
-                                    "file_last_modified_at"
-                                ]
-                                new_entity["file_type"] = existing_entity["file_type"]
-                                new_entity["file_type_group"] = existing_entity[
-                                    "file_type_group"
-                                ]
-                                new_entity["size"] = existing_entity["size"]
-
-                            # Merge existing metadata with new metadata
-                            if new_entity.get("metadata_entries"):
-                                new_metadata_keys = {
-                                    entry["key"]
-                                    for entry in new_entity["metadata_entries"]
-                                }
-                                for existing_entry in existing_entity[
-                                    "metadata_entries"
-                                ]:
-                                    if existing_entry["key"] not in new_metadata_keys:
-                                        new_entity["metadata_entries"].append(
-                                            existing_entry
-                                        )
-
-                            if (
-                                force
-                                or existing_created_at != new_created_at
-                                or existing_modified_at != new_modified_at
-                            ):
-                                tasks.append(
-                                    update_entity(
-                                        client,
-                                        semaphore,
-                                        plugins,
-                                        new_entity,
-                                        existing_entity,
-                                    )
-                                )
-                        elif not is_thumbnail:  # Ignore thumbnails
-                            tasks.append(
-                                add_entity(
-                                    client, semaphore, library_id, plugins, new_entity
-                                )
-                            )
-                    pbar.update(len(batch))
-                    pbar.set_postfix({"Candidates": len(tasks)}, refresh=True)
-
-        # Process all tasks after they've been created
-        for future in tqdm(
-            asyncio.as_completed(tasks),
-            desc=f"Processing {folder_path}",
-            total=len(tasks),
-            leave=True,
-        ):
-            file_path, file_status, succeeded, response = await future
-            if file_status == FileStatus.ADDED:
-                if succeeded:
-                    added_file_count += 1
-                    tqdm.write(f"Added file to library: {file_path}")
-                else:
-                    error_message = "Failed to add file"
-                    if hasattr(response, "status_code"):
-                        error_message += f": {response.status_code}"
-                    if hasattr(response, "text"):
-                        error_message += f" - {response.text}"
-                    else:
-                        error_message += " - Unknown error occurred"
-                    tqdm.write(error_message)
-            elif file_status == FileStatus.UPDATED:
-                if succeeded:
-                    updated_file_count += 1
-                    tqdm.write(f"Updated file in library: {file_path}")
-                else:
-                    error_message = "Failed to update file"
-                    if hasattr(response, "status_code"):
-                        error_message += f": {response.status_code}"
-                    elif hasattr(response, "text"):
-                        error_message += f" - {response.text}"
-                    else:
-                        error_message += f" - Unknown error occurred"
-                    tqdm.write(error_message)
-
-        return added_file_count, updated_file_count, scanned_files
+        return added_file_count, updated_file_count, deleted_file_count
 
 
 @lib_app.command("scan")
@@ -377,7 +220,9 @@ def scan(
     force: bool = False,
     plugins: List[int] = typer.Option(None, "--plugin", "-p"),
     folders: List[int] = typer.Option(None, "--folder", "-f"),
-    batch_size: int = typer.Option(1, "--batch-size", "-bs", help="Batch size for processing files"),
+    batch_size: int = typer.Option(
+        1, "--batch-size", "-bs", help="Batch size for processing files"
+    ),
 ):
     # Check if both path and folders are provided
     if path and folders:
@@ -426,66 +271,12 @@ def scan(
             tqdm.write(f"Folder does not exist or is not a directory: {folder_path}")
             continue
 
-        added_file_count, updated_file_count, scanned_files = asyncio.run(
+        added_file_count, updated_file_count, deleted_file_count = asyncio.run(
             loop_files(library_id, folder, folder_path, force, plugins, batch_size)
         )
         total_files_added += added_file_count
         total_files_updated += updated_file_count
-
-        # Check for deleted files
-        limit = 100
-        offset = 0
-        total_entities = 0  # We'll update this after the first request
-        with tqdm(
-            total=total_entities, desc="Checking for deleted files", leave=True
-        ) as pbar2:
-            while True:
-                existing_files_response = httpx.get(
-                    f"{BASE_URL}/libraries/{library_id}/folders/{folder['id']}/entities",
-                    params={"limit": limit, "offset": offset},
-                    timeout=60,
-                )
-                if existing_files_response.status_code != 200:
-                    pbar2.write(
-                        f"Failed to retrieve existing files: {existing_files_response.status_code} - {existing_files_response.text}"
-                    )
-                    break
-
-                existing_files = existing_files_response.json()
-                if not existing_files:
-                    break
-
-                # Update total if this is the first request
-                if offset == 0:
-                    total_entities = int(
-                        existing_files_response.headers.get(
-                            "X-Total-Count", total_entities
-                        )
-                    )
-                    pbar2.total = total_entities
-                    pbar2.refresh()
-
-                for existing_file in existing_files:
-                    if (
-                        Path(existing_file["filepath"]).is_relative_to(folder_path)
-                        and existing_file["filepath"] not in scanned_files
-                    ):
-                        # File has been deleted
-                        delete_response = httpx.delete(
-                            f"{BASE_URL}/libraries/{library_id}/entities/{existing_file['id']}"
-                        )
-                        if 200 <= delete_response.status_code < 300:
-                            pbar2.write(
-                                f"Deleted file from library: {existing_file['filepath']}"
-                            )
-                            total_files_deleted += 1
-                        else:
-                            pbar2.write(
-                                f"Failed to delete file: {delete_response.status_code} - {delete_response.text}"
-                            )
-                    pbar2.update(1)
-
-                offset += limit
+        total_files_deleted += deleted_file_count
 
     print(f"Total files added: {total_files_added}")
     print(f"Total files updated: {total_files_updated}")
@@ -507,10 +298,11 @@ async def add_entity(
                 post_response = await client.post(
                     f"{BASE_URL}/libraries/{library_id}/entities",
                     json=new_entity,
-                    params={
-                        "plugins": plugins,
-                        "update_index": "true"
-                    } if plugins else {"update_index": "true"},
+                    params=(
+                        {"plugins": plugins, "update_index": "true"}
+                        if plugins
+                        else {"update_index": "true"}
+                    ),
                     timeout=60,
                 )
                 if 200 <= post_response.status_code < 300:
@@ -585,7 +377,9 @@ def reindex(
     force: bool = typer.Option(
         False, "--force", help="Force recreate FTS and vector tables before reindexing"
     ),
-    batch_size: int = typer.Option(1, "--batch-size", "-bs", help="Batch size for processing entities"),
+    batch_size: int = typer.Option(
+        1, "--batch-size", "-bs", help="Batch size for processing entities"
+    ),
 ):
     print(f"Reindexing library {library_id}")
 
@@ -652,16 +446,16 @@ def reindex(
                     if not entities:
                         break
 
-                    # 收集需要处理的实体 ID
+                    # Collect entity IDs to be processed
                     entity_ids = [
-                        entity["id"] 
-                        for entity in entities 
+                        entity["id"]
+                        for entity in entities
                         if entity["id"] not in scanned_entities
                     ]
-                    
-                    # 按 batch_size 分批处理
+
+                    # Process in batches
                     for i in range(0, len(entity_ids), batch_size):
-                        batch_ids = entity_ids[i:i + batch_size]
+                        batch_ids = entity_ids[i : i + batch_size]
                         if batch_ids:
                             batch_response = client.post(
                                 f"{BASE_URL}/entities/batch-index",
@@ -678,6 +472,47 @@ def reindex(
                     offset += limit
 
     print(f"Reindexing completed for library {library_id}")
+
+
+def has_entity_changes(new_entity: dict, existing_entity: dict) -> bool:
+    """
+    Compare new_entity with existing_entity to determine if there are actual changes.
+    Returns True if there are differences, False otherwise.
+    """
+    # Compare basic fields
+    basic_fields = [
+        "filename",
+        "filepath",
+        "size",
+        "file_created_at",
+        "file_last_modified_at",
+        "file_type",
+        "file_type_group",
+    ]
+
+    for field in basic_fields:
+        if new_entity.get(field) != existing_entity.get(field):
+            return True
+
+    # Compare metadata entries
+    new_metadata = {
+        (entry["key"], entry["value"])
+        for entry in new_entity.get("metadata_entries", [])
+    }
+    existing_metadata = {
+        (entry["key"], entry["value"])
+        for entry in existing_entity.get("metadata_entries", [])
+    }
+    if new_metadata != existing_metadata:
+        return True
+
+    # Compare tags
+    new_tags = set(new_entity.get("tags", []))
+    existing_tags = {tag["name"] for tag in existing_entity.get("tags", [])}
+    if new_tags != existing_tags:
+        return True
+
+    return False
 
 
 @lib_app.command("sync")
@@ -751,6 +586,10 @@ def sync(
                 new_entity.setdefault("tags", []).append(metadata["active_app"])
             is_thumbnail = metadata.get(IS_THUMBNAIL, False)
 
+            if is_thumbnail:
+                typer.echo(f"Skipping thumbnail file: {file_path}")
+                return
+
     if response.status_code == 200:
         # File exists, update it
         existing_entity = response.json()
@@ -765,20 +604,23 @@ def sync(
             new_entity["file_type_group"] = existing_entity["file_type_group"]
             new_entity["size"] = existing_entity["size"]
 
-        # Merge existing metadata with new metadata
-        if new_entity.get("metadata_entries"):
+        if not force:
+            # Merge existing metadata with new metadata
             new_metadata_keys = {
-                entry["key"] for entry in new_entity["metadata_entries"]
+                entry["key"] for entry in new_entity.get("metadata_entries", [])
             }
-            for existing_entry in existing_entity["metadata_entries"]:
+            for existing_entry in existing_entity.get("metadata_entries", []):
                 if existing_entry["key"] not in new_metadata_keys:
                     new_entity["metadata_entries"].append(existing_entry)
 
-        if force or (
-            existing_entity["file_last_modified_at"]
-            != new_entity["file_last_modified_at"]
-            or existing_entity["size"] != new_entity["size"]
-        ):
+            # Merge existing tags with new tags
+            existing_tags = {tag["name"] for tag in existing_entity.get("tags", [])}
+            new_tags = set(new_entity.get("tags", []))
+            merged_tags = new_tags.union(existing_tags)
+            new_entity["tags"] = list(merged_tags)
+
+        # Only update if there are actual changes or force flag is set
+        if force or has_entity_changes(new_entity, existing_entity):
             update_response = httpx.put(
                 f"{BASE_URL}/entities/{existing_entity['id']}",
                 json=new_entity,
@@ -795,7 +637,7 @@ def sync(
                     f"Error updating file: {update_response.status_code} - {update_response.text}"
                 )
         else:
-            typer.echo(f"File {file_path} is up to date. No changes made.")
+            typer.echo(f"File {file_path} is up to date. No changes detected.")
 
     else:
         # 3. File doesn't exist, check if it belongs to a folder in the library
@@ -854,7 +696,8 @@ class LibraryFileHandler(FileSystemEventHandler):
         include_files,
         max_workers=2,
         sparsity_factor=3,
-        window_size=10,
+        rate_window_size=10,
+        processing_interval=12,
     ):
         self.library_id = library_id
         self.include_files = include_files
@@ -864,12 +707,12 @@ class LibraryFileHandler(FileSystemEventHandler):
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.lock = threading.Lock()
 
-        self.sparsity_window = 12
+        self.processing_interval = processing_interval
         self.sparsity_factor = sparsity_factor
-        self.window_size = window_size
+        self.rate_window_size = rate_window_size
 
-        self.pending_times = deque(maxlen=window_size)
-        self.sync_times = deque(maxlen=window_size)
+        self.file_change_intervals = deque(maxlen=rate_window_size)
+        self.file_processing_durations = deque(maxlen=rate_window_size)
 
         self.file_count = 0
         self.file_submitted = 0
@@ -877,7 +720,6 @@ class LibraryFileHandler(FileSystemEventHandler):
         self.file_skipped = 0
         self.logger = logger
 
-        self.base_sparsity_window = self.sparsity_window
         self.last_battery_check = 0
         self.battery_check_interval = 60  # Check battery status every 60 seconds
 
@@ -889,7 +731,7 @@ class LibraryFileHandler(FileSystemEventHandler):
 
                 if current_time - file_info["timestamp"] > self.buffer_time:
                     file_info["timestamp"] = current_time
-                    self.pending_times.append(current_time)
+                    self.file_change_intervals.append(current_time)
 
                 file_info["last_size"] = os.path.getsize(event.src_path)
 
@@ -907,10 +749,10 @@ class LibraryFileHandler(FileSystemEventHandler):
                     processed_in_current_loop += 1
                     if os.path.exists(path) and os.path.getsize(path) > 0:
                         self.file_count += 1
-                        if self.file_count % self.sparsity_window == 0:
+                        if self.file_count % self.processing_interval == 0:
                             files_to_process_with_plugins.append(path)
                             print(
-                                f"file_count % sparsity_window: {self.file_count} % {self.sparsity_window} == 0"
+                                f"file_count % processing_interval: {self.file_count} % {self.processing_interval} == 0"
                             )
                             print(f"Picked file for processing with plugins: {path}")
                         else:
@@ -934,7 +776,7 @@ class LibraryFileHandler(FileSystemEventHandler):
                 f"File count: {self.file_count}, Files submitted: {self.file_submitted}, Files synced: {self.file_synced}, Files skipped: {self.file_skipped}"
             )
 
-        self.update_sparsity_window()
+        self.update_processing_interval()
 
     def process_file(self, path, no_plugins):
         self.logger.debug(f"Processing file: {path} (with plugins: {not no_plugins})")
@@ -943,60 +785,60 @@ class LibraryFileHandler(FileSystemEventHandler):
         end_time = time.time()
         if not no_plugins:
             with self.lock:
-                self.sync_times.append(end_time - start_time)
+                self.file_processing_durations.append(end_time - start_time)
                 self.file_synced += 1
 
-    def update_sparsity_window(self):
-        min_samples = max(3, self.window_size // 3)
+    def update_processing_interval(self):
+        min_samples = max(3, self.rate_window_size // 3)
         max_interval = 60  # Maximum allowed interval between events in seconds
 
         if (
-            len(self.pending_times) >= min_samples
-            and len(self.sync_times) >= min_samples
+            len(self.file_change_intervals) >= min_samples
+            and len(self.file_processing_durations) >= min_samples
         ):
             # Filter out large time gaps
             filtered_intervals = [
-                self.pending_times[i] - self.pending_times[i - 1]
-                for i in range(1, len(self.pending_times))
-                if self.pending_times[i] - self.pending_times[i - 1] <= max_interval
+                self.file_change_intervals[i] - self.file_change_intervals[i - 1]
+                for i in range(1, len(self.file_change_intervals))
+                if self.file_change_intervals[i] - self.file_change_intervals[i - 1]
+                <= max_interval
             ]
 
             if filtered_intervals:
-                avg_interval = sum(filtered_intervals) / len(filtered_intervals)
-                pending_files_per_second = 1 / avg_interval if avg_interval > 0 else 0
+                avg_change_interval = sum(filtered_intervals) / len(filtered_intervals)
+                changes_per_second = (
+                    1 / avg_change_interval if avg_change_interval > 0 else 0
+                )
             else:
-                pending_files_per_second = 0
+                changes_per_second = 0
 
-            sync_time_total = sum(self.sync_times)
-            sync_files_per_second = (
-                len(self.sync_times) / sync_time_total if sync_time_total > 0 else 0
+            total_processing_time = sum(self.file_processing_durations)
+            processing_per_second = (
+                len(self.file_processing_durations) / total_processing_time
+                if total_processing_time > 0
+                else 0
             )
 
-            if pending_files_per_second > 0 and sync_files_per_second > 0:
-                rate = pending_files_per_second / sync_files_per_second
-                new_sparsity_window = max(1, math.ceil(self.sparsity_factor * rate))
+            if changes_per_second > 0 and processing_per_second > 0:
+                rate = changes_per_second / processing_per_second
+                new_processing_interval = max(1, math.ceil(self.sparsity_factor * rate))
 
                 current_time = time.time()
                 if current_time - self.last_battery_check > self.battery_check_interval:
                     self.last_battery_check = current_time
                     is_on_battery.cache_clear()  # Clear the cache to get fresh battery status
-                new_sparsity_window = (
-                    new_sparsity_window * 2 if is_on_battery() else new_sparsity_window
-                )
-
-                if new_sparsity_window != self.sparsity_window:
-                    old_sparsity_window = self.sparsity_window
-                    self.sparsity_window = new_sparsity_window
+                if is_on_battery():
+                    new_processing_interval *= 2
                     self.logger.info(
-                        f"Updated sparsity window: {old_sparsity_window} -> {self.sparsity_window}"
+                        "Running on battery, doubling the processing interval."
                     )
-                    self.logger.debug(
-                        f"Pending files per second: {pending_files_per_second:.2f}"
+
+                if new_processing_interval != self.processing_interval:
+                    old_processing_interval = self.processing_interval
+                    self.processing_interval = new_processing_interval
+                    self.logger.info(
+                        f"Processing interval: {old_processing_interval} -> {self.processing_interval}, Changes: {changes_per_second:.2f}it/s, Processing: {processing_per_second:.2f}it/s, Rate (changes/processing): {rate:.2f}"
                     )
-                    self.logger.debug(
-                        f"Sync files per second: {sync_files_per_second:.2f}"
-                    )
-                    self.logger.debug(f"Rate (pending/sync): {rate:.2f}")
 
     def is_valid_file(self, path):
         filename = os.path.basename(path)
@@ -1038,8 +880,17 @@ def watch(
     sparsity_factor: float = typer.Option(
         3.0, "--sparsity-factor", "-sf", help="Sparsity factor for file processing"
     ),
-    window_size: int = typer.Option(
-        10, "--window-size", "-ws", help="Window size for rate calculation"
+    processing_interval: int = typer.Option(
+        12,
+        "--processing-interval",
+        "-pi",
+        help="Process one file with plugins for every N files (higher means less frequent processing)",
+    ),
+    rate_window_size: int = typer.Option(
+        10,
+        "--rate-window",
+        "-rw",
+        help="Number of recent events to consider when calculating processing rates",
     ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable verbose logging"
@@ -1083,7 +934,8 @@ def watch(
             library_id,
             include_files,
             sparsity_factor=sparsity_factor,
-            window_size=window_size,
+            processing_interval=processing_interval,
+            rate_window_size=rate_window_size,
         )
         handlers.append(event_handler)
         observer.schedule(event_handler, str(folder_path), recursive=True)
@@ -1100,3 +952,319 @@ def watch(
         for handler in handlers:
             handler.executor.shutdown(wait=True)
     observer.join()
+
+
+async def collect_candidate_files(folder_path: Path) -> List[str]:
+    """
+    Collect candidate files to be processed
+
+    Args:
+        folder_path: Folder path
+
+    Returns:
+        List[str]: List of candidate file paths
+    """
+    candidate_files = []
+    for root, _, files in os.walk(folder_path):
+        with tqdm(total=len(files), desc=f"Scanning {root}", leave=True) as pbar:
+            for file in files:
+                file_path = Path(root) / file
+                absolute_file_path = file_path.resolve()
+
+                # Check if the file extension is in the include_files list and is not a temporary file
+                if file_path.suffix.lower() in include_files and not is_temp_file(file):
+                    candidate_files.append(str(absolute_file_path))
+                pbar.update(1)
+
+    return candidate_files
+
+
+async def prepare_entity(file_path: str, folder_id: int) -> Dict[str, Any]:
+    """
+    Prepare entity data
+
+    Args:
+        file_path: File path
+        folder_id: Folder ID
+
+    Returns:
+        Dict[str, Any]: Entity data
+    """
+    file_path = Path(file_path)
+    file_stat = file_path.stat()
+    file_type, file_type_group = get_file_type(file_path)
+
+    new_entity = {
+        "filename": file_path.name,
+        "filepath": str(file_path),
+        "size": file_stat.st_size,
+        "file_created_at": format_timestamp(file_stat.st_ctime),
+        "file_last_modified_at": format_timestamp(file_stat.st_mtime),
+        "file_type": file_type,
+        "file_type_group": file_type_group,
+        "folder_id": folder_id,
+    }
+
+    # Handle image metadata
+    is_thumbnail = False
+    if file_type_group == "image":
+        metadata = get_image_metadata(file_path)
+        if metadata:
+            if "active_window" in metadata and "active_app" not in metadata:
+                metadata["active_app"] = metadata["active_window"].split(" - ")[0]
+            new_entity["metadata_entries"] = [
+                {
+                    "key": key,
+                    "value": str(value),
+                    "source": MetadataSource.SYSTEM_GENERATED.value,
+                    "data_type": (
+                        "number" if isinstance(value, (int, float)) else "text"
+                    ),
+                }
+                for key, value in metadata.items()
+                if key != IS_THUMBNAIL
+            ]
+            if "active_app" in metadata:
+                new_entity.setdefault("tags", []).append(metadata["active_app"])
+            is_thumbnail = metadata.get(IS_THUMBNAIL, False)
+
+    new_entity["is_thumbnail"] = is_thumbnail
+    return new_entity
+
+
+def format_error_message(
+    file_status: FileStatus, response: Optional[httpx.Response]
+) -> str:
+    """
+    Format error message
+
+    Args:
+        file_status: File status
+        response: HTTP response
+
+    Returns:
+        str: Formatted error message
+    """
+    action = "add" if file_status == FileStatus.ADDED else "update"
+    error_message = f"Failed to {action} file"
+
+    if response:
+        if hasattr(response, "status_code"):
+            error_message += f": {response.status_code}"
+        if hasattr(response, "text"):
+            error_message += f" - {response.text}"
+    else:
+        error_message += " - Unknown error occurred"
+
+    return error_message
+
+
+async def process_file_batches(
+    client: httpx.AsyncClient,
+    library_id: int,
+    folder: dict,
+    candidate_files: list,
+    force: bool,
+    plugins: list,
+    semaphore: asyncio.Semaphore,
+) -> Tuple[int, int]:
+    """
+    Process file batches
+
+    Args:
+        client: httpx async client
+        library_id: Library ID
+        folder: Folder information
+        candidate_files: List of candidate files
+        force: Whether to force update
+        plugins: List of plugins
+        semaphore: Concurrency control semaphore
+
+    Returns:
+        Tuple[int, int]: (Number of files added, Number of files updated)
+    """
+    added_file_count = 0
+    updated_file_count = 0
+    batching = 50
+
+    with tqdm(total=len(candidate_files), desc="Processing files", leave=True) as pbar:
+        for i in range(0, len(candidate_files), batching):
+            batch = candidate_files[i : i + batching]
+
+            # Get existing entities in the batch
+            get_response = await client.post(
+                f"{BASE_URL}/libraries/{library_id}/entities/by-filepaths",
+                json=batch,
+            )
+
+            if get_response.status_code != 200:
+                print(
+                    f"Failed to get entities: {get_response.status_code} - {get_response.text}"
+                )
+                pbar.update(len(batch))
+                continue
+
+            existing_entities = get_response.json()
+            existing_entities_dict = {
+                entity["filepath"]: entity for entity in existing_entities
+            }
+
+            # Process each file
+            tasks = []
+            for file_path in batch:
+                new_entity = await prepare_entity(file_path, folder["id"])
+
+                if new_entity.get("is_thumbnail", False):
+                    typer.echo(f"Skipping thumbnail file: {file_path}")
+                    continue
+
+                existing_entity = existing_entities_dict.get(str(file_path))
+                if existing_entity:
+                    if not force:
+                        # Merge existing metadata with new metadata
+                        new_metadata_keys = {
+                            entry["key"]
+                            for entry in new_entity.get("metadata_entries", [])
+                        }
+                        for existing_entry in existing_entity.get(
+                            "metadata_entries", []
+                        ):
+                            if existing_entry["key"] not in new_metadata_keys:
+                                new_entity.setdefault("metadata_entries", []).append(
+                                    existing_entry
+                                )
+
+                        # Merge existing tags with new tags
+                        existing_tags = {
+                            tag["name"] for tag in existing_entity.get("tags", [])
+                        }
+                        new_tags = set(new_entity.get("tags", []))
+                        merged_tags = new_tags.union(existing_tags)
+                        new_entity["tags"] = list(merged_tags)
+
+                    # Only update if there are actual changes or force flag is set
+                    if force or has_entity_changes(new_entity, existing_entity):
+                        tasks.append(
+                            update_entity(
+                                client, semaphore, plugins, new_entity, existing_entity
+                            )
+                        )
+                    else:
+                        pbar.write(f"Skipping file: {file_path}")
+                        pbar.update(1)
+                        continue
+                else:
+                    tasks.append(
+                        add_entity(client, semaphore, library_id, plugins, new_entity)
+                    )
+
+            # Process task results
+            if tasks:
+                for future in asyncio.as_completed(tasks):
+                    file_path, file_status, succeeded, response = await future
+                    if succeeded:
+                        if file_status == FileStatus.ADDED:
+                            added_file_count += 1
+                            tqdm.write(f"Added file to library: {file_path}")
+                        else:
+                            updated_file_count += 1
+                            tqdm.write(f"Updated file in library: {file_path}")
+                    else:
+                        error_message = format_error_message(file_status, response)
+                        tqdm.write(error_message)
+
+                    # Update progress bar for each file processed
+                    pbar.update(1)
+                    pbar.set_postfix(
+                        {"Added": added_file_count, "Updated": updated_file_count},
+                        refresh=True,
+                    )
+
+    return added_file_count, updated_file_count
+
+
+async def check_deleted_files(
+    client: httpx.AsyncClient,
+    library_id: int,
+    folder: dict,
+    folder_path: Path,
+    scanned_files: Set[str],
+) -> int:
+    """
+    Check and handle deleted files
+
+    Args:
+        client: httpx async client
+        library_id: Library ID
+        folder: Folder information
+        folder_path: Folder path
+        scanned_files: Set of scanned files
+
+    Returns:
+        int: Number of deleted files
+    """
+    deleted_count = 0
+    limit = 100
+    offset = 0
+    total_entities = 0
+
+    with tqdm(
+        total=total_entities, desc="Checking for deleted files", leave=True
+    ) as pbar:
+        while True:
+            # Add path_prefix parameter to only get entities under the folder_path
+            existing_files_response = await client.get(
+                f"{BASE_URL}/libraries/{library_id}/folders/{folder['id']}/entities",
+                params={
+                    "limit": limit,
+                    "offset": offset,
+                    "path_prefix": str(folder_path),
+                },
+                timeout=60,
+            )
+
+            if existing_files_response.status_code != 200:
+                pbar.write(
+                    f"Failed to retrieve existing files: {existing_files_response.status_code} - {existing_files_response.text}"
+                )
+                break
+
+            existing_files = existing_files_response.json()
+            if not existing_files:
+                break
+
+            # Update total count (if this is the first request)
+            if offset == 0:
+                total_entities = int(
+                    existing_files_response.headers.get("X-Total-Count", total_entities)
+                )
+                pbar.total = total_entities
+                pbar.refresh()
+
+            for existing_file in existing_files:
+                if (
+                    # path_prefix may include files not in the folder_path,
+                    # for example when folder_path is 20241101 but there is another folder 20241101-copy
+                    # so check the existing_file is relative_to folder_path is required,
+                    # do not remove this.
+                    Path(existing_file["filepath"]).is_relative_to(folder_path)
+                    and existing_file["filepath"] not in scanned_files
+                ):
+                    # File has been deleted
+                    delete_response = await client.delete(
+                        f"{BASE_URL}/libraries/{library_id}/entities/{existing_file['id']}"
+                    )
+                    if 200 <= delete_response.status_code < 300:
+                        pbar.write(
+                            f"Deleted file from library: {existing_file['filepath']}"
+                        )
+                        deleted_count += 1
+                    else:
+                        pbar.write(
+                            f"Failed to delete file: {delete_response.status_code} - {delete_response.text}"
+                        )
+                pbar.update(1)
+
+            offset += limit
+
+    return deleted_count
