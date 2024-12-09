@@ -170,7 +170,18 @@ class LibraryPluginModel(Base):
 
 
 def load_extension(dbapi_conn, connection_record):
-    dbapi_conn.enable_load_extension(True)
+    try:
+        dbapi_conn.enable_load_extension(True)
+    except AttributeError as e:
+        print("Error: Current SQLite3 build doesn't support loading extensions.")
+        print("\nRecommended solutions:")
+        print("1. Install Python using Conda (recommended for both Windows and macOS):")
+        print("   conda create -n yourenv python")
+        print("   conda activate yourenv")
+        print("\n2. Or on macOS, you can use Homebrew:")
+        print("   brew install python")
+        print(f"\nDetailed error: {str(e)}")
+        raise
 
     # load simple tokenizer
     current_dir = Path(__file__).parent.resolve()
@@ -243,10 +254,11 @@ def init_database():
     db_path = get_database_path()
     engine = create_engine(
         f"sqlite:///{db_path}",
-        pool_size=3,
-        max_overflow=0,
-        pool_timeout=30,
-        connect_args={"timeout": 30}
+        pool_size=10,
+        max_overflow=20,
+        pool_timeout=60,
+        pool_recycle=3600,
+        connect_args={"timeout": 60}
     )
 
     # Use a single event listener for both extension loading and WAL mode setting

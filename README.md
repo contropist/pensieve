@@ -4,9 +4,9 @@
 
 English | [简体中文](README_ZH.md) | [日本語](README_JP.md)
 
-![memos-search](docs/images/memos-search-en.gif)
+![pensieve-search](docs/images/pensieve-search-en.gif)
 
-[![哔哩哔哩](https://img.shields.io/badge/Bilibili-哔哩哔哩-%23fb7299)](https://www.bilibili.com/video/BV16XUkY7EJm)
+[![哔哩哔哩](https://img.shields.io/badge/Bilibili-哔哩哔哩-%23fb7299)](https://www.bilibili.com/video/BV16XUkY7EJm) [![YouTube](https://img.shields.io/badge/YouTube-YouTube-%23ff0000)](https://www.youtube.com/watch?v=tAnYkeKTFUc)
 
 > I changed the name to Pensieve because Memos was already taken.
 
@@ -37,7 +37,19 @@ This project draws heavily from two other projects: one called [Rewind](https://
 >
 > ```python
 > import sqlite3
-> print(sqlite3.sqlite_version)
+> 
+> # Check sqlite version
+> print(f"SQLite version: {sqlite3.sqlite_version}")
+> 
+> # Test if enable_load_extension is supported
+> try:
+>     conn = sqlite3.connect(':memory:')
+>     conn.enable_load_extension(True)
+>     print("enable_load_extension is supported")
+> except AttributeError:
+>     print("enable_load_extension is not supported")
+> finally:
+>     conn.close()
 > ```
 >
 > If you find that this does not work properly, you can install [miniconda](https://docs.conda.io/en/latest/miniconda.html) to manage your Python environment. Alternatively, check the current issue list to see if others have encountered the same problem.
@@ -210,6 +222,41 @@ memos scan
 ```
 
 This command will scan and index all recorded screenshots. Note that depending on the number of screenshots and system configuration, this process may take some time and consume significant system resources. The index construction is idempotent, and running this command multiple times will not re-index already indexed data.
+
+### Sampling Strategy
+
+Pensieve dynamically adjusts the image processing interval based on the speed of screenshot generation and the speed of processing individual images. In environments without NVIDIA GPUs, it may be challenging to ensure that image processing keeps up with the rate of screenshot generation. To address this, Pensieve processes images on a sampled basis.
+
+To prevent excessive system load, Pensieve’s default sampling strategy is intentionally conservative. However, this conservative approach might limit the performance of devices with higher computational capacity. To provide more flexibility, additional control options have been introduced in `~/.memos/config.yaml`, allowing users to configure the system for either more conservative or more aggressive processing strategies.
+
+```yaml
+watch:
+  # number of recent events to consider when calculating processing rates
+  rate_window_size: 10
+  # sparsity factor for file processing
+  # a higher value means less frequent processing
+  # 1.0 means process every file, can not be less than 1.0
+  sparsity_factor: 3.0
+  # initial processing interval for file processing, means process one file 
+  # with plugins for every N files
+  # but will be adjusted automatically based on the processing rate
+  # 12 means processing one file every 12 screenshots generated
+  processing_interval: 12
+```
+
+If you want every screenshot file to be processed, you can configure the settings as follows:
+
+```yaml
+# A watch config like this means process every file with plugins at the beginning
+# but if the processing rate is slower than file generated, the processing interval 
+# will be increased automatically
+watch:
+  rate_window_size: 10
+  sparsity_factor: 1.0
+  processing_interval: 1
+```
+
+Remember to do `memos stop && memos start` to make the new config work.
 
 ## Privacy and Security
 

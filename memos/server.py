@@ -1,7 +1,8 @@
 import os
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends, status, Query, Request, APIRouter
+import mimetypes
+from fastapi import FastAPI, HTTPException, Depends, status, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -50,9 +51,23 @@ from .models import load_extension
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
+# Configure mimetypes for JavaScript files
+# This is a workaround for the issue:
+# https://github.com/python/cpython/issues/88141#issuecomment-1631735902
+# Without this, the mime type of .js files will be text/plain and
+# the browser will not render them correctly in some windows machines.
+mimetypes.add_type("application/javascript", ".js")
+
 app = FastAPI()
 
-engine = create_engine(f"sqlite:///{get_database_path()}")
+engine = create_engine(
+    f"sqlite:///{get_database_path()}",
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=60,
+    pool_recycle=3600,
+    connect_args={"timeout": 60},
+)
 event.listen(engine, "connect", load_extension)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -224,8 +239,8 @@ async def new_entity(
         await trigger_webhooks(library, entity, request, plugins)
 
     if update_index:
-        crud.update_entity_index(entity, db) 
-        
+        crud.update_entity_index(entity.id, db)
+
     return entity
 
 
@@ -239,6 +254,7 @@ def list_entities_in_folder(
     folder_id: int,
     limit: Annotated[int, Query(ge=1, le=400)] = 10,
     offset: int = 0,
+    path_prefix: str | None = None,
     db: Session = Depends(get_db),
 ):
     library = crud.get_library_by_id(library_id, db)
@@ -254,7 +270,7 @@ def list_entities_in_folder(
         )
 
     entities, total_count = crud.get_entities_of_folder(
-        library_id, folder_id, db, limit, offset
+        library_id, folder_id, db, limit, offset, path_prefix
     )
     return JSONResponse(
         content=jsonable_encoder(entities), headers={"X-Total-Count": str(total_count)}
@@ -344,7 +360,7 @@ async def update_entity(
         await trigger_webhooks(library, entity, request, plugins)
 
     if update_index:
-        crud.update_entity_index(entity, db)
+        crud.update_entity_index(entity.id, db)
 
     return entity
 
@@ -364,7 +380,7 @@ def update_entity_last_scan_at(entity_id: int, db: Session = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Entity not found",
         )
-    
+
 
 @app.post(
     "/entities/{entity_id}/index",
@@ -381,8 +397,8 @@ def update_index(entity_id: int, db: Session = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Entity not found",
         )
-    
-    crud.update_entity_index(entity, db)
+
+    crud.update_entity_index(entity.id, db)
 
 
 @app.post(
@@ -390,20 +406,14 @@ def update_index(entity_id: int, db: Session = Depends(get_db)):
     status_code=status.HTTP_204_NO_CONTENT,
     tags=["entity"],
 )
-async def batch_update_index(
-    request: BatchIndexRequest,
-    db: Session = Depends(get_db)
-):
+async def batch_update_index(request: BatchIndexRequest, db: Session = Depends(get_db)):
     """
     Batch update the FTS and vector indexes for multiple entities.
     """
     try:
         crud.batch_update_entity_indices(request.entity_ids, db)
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
 
 @app.put("/entities/{entity_id}/tags", response_model=Entity, tags=["entity"])

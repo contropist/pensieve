@@ -4,9 +4,10 @@
 
 [English](README.md) | 简体中文 | [日本語](README_JP.md)
 
-![memos-search](docs/images/memos-search-cn.gif)
+![pensieve-search](docs/images/pensieve-search-en.gif)
 
-[![哔哩哔哩](https://img.shields.io/badge/Bilibili-哔哩哔哩-%23fb7299)](https://www.bilibili.com/video/BV16XUkY7EJm)
+[![哔哩哔哩](https://img.shields.io/badge/Bilibili-哔哩哔哩-%23fb7299)](https://www.bilibili.com/video/BV16XUkY7EJm) [![YouTube](https://img.shields.io/badge/YouTube-YouTube-%23ff0000)](https://www.youtube.com/watch?v=tAnYkeKTFUc)
+
 
 > 我对名字进行了调整，因为 Memos 这个名字已经被其他人注册了，所以改成了 Pensieve。
 
@@ -37,7 +38,19 @@ Pensieve 是一个专注于隐私的被动记录项目。它可以自动记录�
 >
 > ```python
 > import sqlite3
-> print(sqlite3.sqlite_version)
+> 
+> # Check sqlite version
+> print(f"SQLite version: {sqlite3.sqlite_version}")
+> 
+> # Test if enable_load_extension is supported
+> try:
+>     conn = sqlite3.connect(':memory:')
+>     conn.enable_load_extension(True)
+>     print("enable_load_extension is supported")
+> except AttributeError:
+>     print("enable_load_extension is not supported")
+> finally:
+>     conn.close()
 > ```
 >
 > 如果你发现这样无法正常工作，那么可以安装 [miniconda](https://docs.conda.io/en/latest/miniconda.html) 来管理 Python 环境。或者查看目前的 issue 列表，看看是否有其他人遇到同样的问题。
@@ -75,7 +88,7 @@ memos start
 
 打开浏览器，访问 `http://localhost:8839`
 
-![init page](docs/images/init-page-cn.png)
+![init page](docs/images/init-page-en.png)
 
 ### Mac 下的权限问题
 
@@ -215,6 +228,35 @@ memos scan
 ```
 
 该命令会扫描并索引所有已记录的截图。请注意，根据截图数量和系统配置的不同，这个过程可能会持续一段时间，并且会占用较多系统资源。索引的构建是幂等的，多次运行该命令不会对已索引的数据进行重复索引。
+
+### 调整索引频率
+
+Pensieve 在运行时，会根据截图生成的频率和单个截图的处理速度动态调整图像处理的间隔。对于没有 NVIDIA GPU 的情况，很难保证单个图像的处理速度比截图生成速度快，因此截图处理是抽样执行的。为了避免电脑负载过高，Pensieve 默认的抽样策略非常保守，这可能会导致有充足算力的设备无法充分发挥其性能。因此，在 `config.yaml` 中增加了更多的控制选项，允许用户选择更保守或更激进的策略。
+
+```yaml
+watch:
+  # 统计处理速率的窗口大小
+  rate_window_size: 10
+  # 文件处理的稀疏因子
+  # 值越高，处理频率越低
+  # 1.0 表示处理每个文件，不能小于 1.0
+  sparsity_factor: 3.0
+  # 文件处理的初始间隔，表示每 N 个文件处理一个文件
+  # 但会根据处理速率自动调整
+  # 12 表示一开始每 12 个文件处理一个文件
+  processing_interval: 12
+```
+
+如果希望每个截图文件都被处理，可以这么配置：
+
+```yaml
+# 这样的监控配置意味着一开始会处理每个文件
+# 但如果处理速度比文件生成速度慢，处理间隔将会自动增加
+watch:
+  rate_window_size: 10
+  sparsity_factor: 1.0
+  processing_interval: 1
+```
 
 ## 隐私安全
 

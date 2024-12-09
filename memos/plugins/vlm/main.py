@@ -12,6 +12,10 @@ import io
 import numpy as np
 
 
+# Configure logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 PLUGIN_NAME = "vlm"
 
 router = APIRouter(tags=[PLUGIN_NAME], responses={404: {"description": "Not found"}})
@@ -24,9 +28,11 @@ semaphore = None
 force_jpeg = None
 prompt = None
 
-# Configure logger
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+
+def get_metadata_name() -> str:
+    """Return the metadata field name used by this plugin."""
+    global modelname
+    return f"{modelname.replace('-', '_')}_result"
 
 
 def image2base64(img_path):
@@ -70,7 +76,7 @@ def image2base64(img_path):
 
 
 async def fetch(endpoint: str, client, request_data, headers: Optional[dict] = None):
-    async with semaphore:  # 使用信号量控制并发
+    async with semaphore:
         try:
             response = await client.post(
                 f"{endpoint}/v1/chat/completions",
@@ -146,7 +152,7 @@ async def predict_remote(
     async with httpx.AsyncClient() as client:
         headers = {}
         if token:
-            headers["Authorization"] = f"Bearer {token}"
+            headers["Authorization"] = f"Bearer {token.get_secret_value()}"
         return await fetch(endpoint, client, request_data, headers=headers)
 
 
@@ -159,7 +165,7 @@ async def read_root():
 @router.post("/")
 async def vlm(entity: Entity, request: Request):
     global modelname, endpoint, token
-    metadata_field_name = f"{modelname.replace('-', '_')}_result"
+    metadata_field_name = get_metadata_name()
     if not entity.file_type_group == "image":
         return {metadata_field_name: ""}
 
@@ -192,7 +198,7 @@ async def vlm(entity: Entity, request: Request):
 
     vlm_result = await predict(endpoint, modelname, entity.filepath, token=token)
 
-    logger.info(vlm_result)
+    logger.info(f"VLM result: {vlm_result[:100]}...")
     if not vlm_result:
         logger.info(f"No VLM result found for file: {entity.filepath}")
         return {metadata_field_name: "{}"}

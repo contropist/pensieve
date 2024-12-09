@@ -4,9 +4,9 @@
 
 [English](README.md) | [简体中文](README_ZH.md) | 日本語
 
-![memos-search](docs/images/memos-search-en.gif)
+![pensieve-search](docs/images/pensieve-search-en.gif)
 
-[![哔哩哔哩](https://img.shields.io/badge/Bilibili-哔哩哔哩-%23fb7299)](https://www.bilibili.com/video/BV16XUkY7EJm)
+[![哔哩哔哩](https://img.shields.io/badge/Bilibili-哔哩哔哩-%23fb7299)](https://www.bilibili.com/video/BV16XUkY7EJm) [![YouTube](https://img.shields.io/badge/YouTube-YouTube-%23ff0000)](https://www.youtube.com/watch?v=tAnYkeKTFUc)
 
 > 名前をPensieveに変更しました。Memosという名前は既に使用されていたためです。
 
@@ -37,7 +37,19 @@ Pensieveはプライバシーに焦点を当てたパッシブレコーディン
 >
 > ```python
 > import sqlite3
-> print(sqlite3.sqlite_version)
+> 
+> # Check sqlite version
+> print(f"SQLite version: {sqlite3.sqlite_version}")
+> 
+> # Test if enable_load_extension is supported
+> try:
+>     conn = sqlite3.connect(':memory:')
+>     conn.enable_load_extension(True)
+>     print("enable_load_extension is supported")
+> except AttributeError:
+>     print("enable_load_extension is not supported")
+> finally:
+>     conn.close()
 > ```
 >
 > これが正しく動作しない場合は、Python環境を管理するために[miniconda](https://docs.conda.io/en/latest/miniconda.html)をインストールすることができます。あるいは、他の人が同じ問題に遭遇しているかどうかを確認するために、現在の問題リストをチェックしてください。
@@ -210,6 +222,41 @@ memos scan
 ```
 
 このコマンドは記録されたすべてのスクリーンショットをスキャンしてインデックス化します。スクリーンショットの数とシステム構成に応じて、このプロセスには時間がかかる場合があり、システムリソースを多く消費する可能性があります。インデックスの構築は冪等であり、このコマンドを複数回実行しても既にインデックス化されたデータを再インデックス化することはありません。
+
+### サンプリング戦略
+
+Pensieveは、スクリーンショット生成の速度と個々の画像処理の速度に基づいて、画像処理の間隔を動的に調整します。NVIDIA GPUがない環境では、画像処理がスクリーンショット生成の速度に追いつくことが難しい場合があります。これに対処するために、Pensieveはサンプリングベースで画像を処理します。
+
+システム負荷を防ぐために、Pensieveのデフォルトのサンプリング戦略は意図的に保守的です。しかし、この保守的なアプローチは、より高い計算能力を持つデバイスのパフォーマンスを制限する可能性があります。より柔軟性を提供するために、`~/.memos/config.yaml`に追加の制御オプションが導入されており、ユーザーはシステムをより保守的またはより積極的な処理戦略に設定することができます。
+
+```yaml
+watch:
+  # number of recent events to consider when calculating processing rates
+  rate_window_size: 10
+  # sparsity factor for file processing
+  # a higher value means less frequent processing
+  # 1.0 means process every file, can not be less than 1.0
+  sparsity_factor: 3.0
+  # initial processing interval for file processing, means process one file 
+  # with plugins for every N files
+  # but will be adjusted automatically based on the processing rate
+  # 12 means processing one file every 12 screenshots generated
+  processing_interval: 12
+```
+
+すべてのスクリーンショットファイルを処理したい場合は、次のように設定を構成できます：
+
+```yaml
+# A watch config like this means process every file with plugins at the beginning
+# but if the processing rate is slower than file generated, the processing interval 
+# will be increased automatically
+watch:
+  rate_window_size: 10
+  sparsity_factor: 1.0
+  processing_interval: 1
+```
+
+新しい設定を反映させるために、`memos stop && memos start`を実行してください。
 
 ## プライバシーとセキュリティ
 
